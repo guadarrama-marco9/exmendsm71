@@ -1,0 +1,19 @@
+==============================================================================
+REPORTE DE RIESGOS ÉTICOS DE IA - LogiSmart Demo
+Generado: 2026-10-03 10:13
+==============================================================================
+Módulos: 3 | Riesgos: 3 | Puntaje promedio: 14.67
+Por nivel: critico=1, alto=2, medio=0, bajo=0
+Por categoría: privacidad=1, seguridad=1, responsabilidad=1
+
+MATRIZ (ordenada de mayor a menor riesgo):
+Módulo                          Riesgo                             P  I  Pts  Res  Nivel
+------------------------------------------------------------------------------
+Cámara                          Privacidad conductor               4  5   20   15  critico
+Clasificador                    Alucinaciones del LLM              3  4   12    8  alto
+Sistema                         Dependencia automatización         3  4   12    8  alto
+
+MITIGACIONES PROPUESTAS:
+  - [CRITICO] Cámara: Procesamiento en borde
+  - [ALTO] Clasificador: Validación JSON
+  - [ALTO] Sistema: Revisión humana
