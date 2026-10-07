@@ -5,45 +5,8 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from datetime import datetime
 from threading import Thread
-
-
-# ------------------------------------------------------------
-# CONFIGURACIÓN DEL MODELO
-# ------------------------------------------------------------
-
 MODELO = "llama3.2"
 
-
-# ------------------------------------------------------------
-# CONFIGURACIÓN DEL SISTEMA
-# ------------------------------------------------------------
-
-mensaje_sistema = """
-Eres un experto en desarrollo de software y arquitectura de sistemas.
-
-Tu función es ayudar a desarrolladores junior y estudiantes de ingeniería.
-
-Debes:
-
-1. Explicar los conceptos de arquitectura de software de manera clara.
-2. Utilizar ejemplos prácticos del mundo real.
-3. Explicar los procedimientos paso a paso, incluyendo diagramas conceptuales.
-4. Evitar respuestas excesivamente técnicas cuando
-   el desarrollador sea principiante.
-5. Cuando sea posible, proporcionar ejemplos en Python, JavaScript o Java.
-6. Si el desarrollador comete un error, explicarle
-   cómo corregirlo y por qué ocurrió.
-7. No proporcionar únicamente la respuesta final.
-8. Explicar el razonamiento y los conceptos necesarios
-   para comprender el problema.
-9. Sugerir mejores prácticas y patrones de diseño cuando sea apropiado.
-10. Ayudar a entender patrones como MVC, Repository, Factory, etc.
-"""
-
-
-# ------------------------------------------------------------
-# CLASE PRINCIPAL DE LA APLICACIÓN
-# ------------------------------------------------------------
 
 class TutorInteligenteGUI:
     def __init__(self, root):
@@ -51,15 +14,12 @@ class TutorInteligenteGUI:
         self.root.title("Tutor Inteligente con LLM")
         self.root.geometry("900x700")
         
-        # Historial de mensajes
         self.mensajes = [
             {"role": "system", "content": mensaje_sistema}
         ]
         
-        # Configurar estilos
         self.configurar_estilos()
         
-        # Crear interfaz
         self.crear_interfaz()
     
     def configurar_estilos(self):
@@ -77,22 +37,19 @@ class TutorInteligenteGUI:
     def crear_interfaz(self):
         """Crea todos los componentes de la interfaz gráfica."""
         
-        # Frame principal
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Header
         header_frame = ttk.Frame(main_frame)
         header_frame.pack(fill=tk.X, pady=(0, 10))
         
         header_label = ttk.Label(
             header_frame, 
-            text="🎓 TUTOR INTELIGENTE CON LLM",
+            text="TUTOR INTELIGENTE CON LLM",
             style='Header.TLabel'
         )
         header_label.pack(fill=tk.X, ipady=10)
         
-        # Información del modelo
         info_frame = ttk.Frame(main_frame)
         info_frame.pack(fill=tk.X, pady=(0, 10))
         
@@ -103,11 +60,9 @@ class TutorInteligenteGUI:
         )
         modelo_label.pack(side=tk.LEFT)
         
-        # Área de chat
         chat_frame = ttk.LabelFrame(main_frame, text="Conversación", padding=10)
         chat_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
-        # Área de mensajes (scrolled text)
         self.chat_area = scrolledtext.ScrolledText(
             chat_frame,
             wrap=tk.WORD,
@@ -119,11 +74,10 @@ class TutorInteligenteGUI:
         self.chat_area.pack(fill=tk.BOTH, expand=True)
         
         # Configurar tags para colorear mensajes
-        self.chat_area.tag_config('user', foreground='#2980b9', font=('Arial', 10, 'bold'))
+        self.chat_area.tag_config('user', foreground='#1e3a8a', font=('Arial', 10, 'bold'))
         self.chat_area.tag_config('assistant', foreground='#27ae60', font=('Arial', 10))
         self.chat_area.tag_config('system', foreground='#7f8c8d', font=('Arial', 9, 'italic'))
         
-        # Área de entrada
         input_frame = ttk.Frame(main_frame)
         input_frame.pack(fill=tk.X, pady=(0, 10))
         
@@ -133,7 +87,6 @@ class TutorInteligenteGUI:
         self.input_text.pack(fill=tk.X, pady=(5, 10))
         self.input_text.bind('<Return>', lambda e: self.enviar_mensaje())
         
-        # Botones
         button_frame = ttk.Frame(input_frame)
         button_frame.pack(fill=tk.X)
         
@@ -146,14 +99,14 @@ class TutorInteligenteGUI:
         
         self.resumen_btn = ttk.Button(
             button_frame,
-            text="📋 Ver Resumen",
+            text="Ver Resumen",
             command=self.mostrar_resumen
         )
         self.resumen_btn.pack(side=tk.LEFT, padx=5)
         
         self.limpiar_btn = ttk.Button(
             button_frame,
-            text="🗑️ Limpiar Chat",
+            text=" Limpiar Chat",
             command=self.limpiar_chat
         )
         self.limpiar_btn.pack(side=tk.LEFT, padx=5)
@@ -165,7 +118,6 @@ class TutorInteligenteGUI:
         )
         self.salir_btn.pack(side=tk.RIGHT)
         
-        # Barra de estado
         self.status_var = tk.StringVar(value="Listo para ayudar")
         status_bar = ttk.Label(
             main_frame,
@@ -175,15 +127,9 @@ class TutorInteligenteGUI:
         )
         status_bar.pack(fill=tk.X, pady=(10, 0))
         
-        # Mensaje de bienvenida
         self.agregar_mensaje_chat(
             "system",
-            "¡Bienvenido! Soy tu tutor de arquitectura de software. Puedo ayudarte con:\n"
-            "• Patrones de diseño (MVC, Factory, Repository, etc.)\n"
-            "• Principios SOLID\n"
-            "• Arquitectura de software\n"
-            "• Mejores prácticas de desarrollo\n\n"
-            "Escribe tu pregunta y presiona Enter o clic en Enviar."
+            "Soy tu tutor de arquitectura de software. Escribe tu pregunta y presiona Enter o clic en Enviar."
         )
     
     def agregar_mensaje_chat(self, rol, contenido):
@@ -200,23 +146,18 @@ class TutorInteligenteGUI:
             messagebox.showwarning("Advertencia", "Por favor escribe una pregunta.")
             return
         
-        # Limpiar campo de entrada
         self.input_text.delete(0, tk.END)
         
-        # Mostrar pregunta del usuario
         self.agregar_mensaje_chat("user", pregunta)
         
-        # Agregar al historial
         self.mensajes.append({
             "role": "user",
             "content": pregunta
         })
         
-        # Deshabilitar botones durante el procesamiento
         self.enviar_btn.config(state=tk.DISABLED)
         self.status_var.set("Procesando respuesta...")
         
-        # Procesar en un hilo separado para no bloquear la GUI
         thread = Thread(target=self.procesar_respuesta_llm)
         thread.daemon = True
         thread.start()
@@ -231,17 +172,14 @@ class TutorInteligenteGUI:
             
             contenido = respuesta["message"]["content"]
             
-            # Agregar respuesta al historial
             self.mensajes.append({
                 "role": "assistant",
                 "content": contenido
             })
             
-            # Mostrar respuesta en la GUI (debe ejecutarse en el hilo principal)
             self.root.after(0, lambda: self.mostrar_respuesta(contenido))
             
         except Exception as error:
-            # Eliminar la pregunta del historial si falló
             self.mensajes.pop()
             error_msg = f"Error al conectar con el LLM: {error}\nVerifica que Ollama esté ejecutándose."
             self.root.after(0, lambda: self.mostrar_error(error_msg))
@@ -264,24 +202,20 @@ class TutorInteligenteGUI:
         ventana_resumen.title("Resumen de la Conversación")
         ventana_resumen.geometry("600x500")
         
-        # Frame principal
         frame = ttk.Frame(ventana_resumen, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
         
-        # Título
         ttk.Label(
             frame,
-            text="📋 RESUMEN DE LA CONVERSACIÓN",
+            text="RESUMEN DE LA CONVERSACIÓN",
             font=('Arial', 12, 'bold')
         ).pack(pady=(0, 10))
         
-        # Información general
         info_text = f"Total de mensajes: {len(self.mensajes)}\n"
         info_text += f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         
         ttk.Label(frame, text=info_text, font=('Arial', 10)).pack(anchor=tk.W, pady=(0, 10))
         
-        # Área de resumen
         resumen_area = scrolledtext.ScrolledText(
             frame,
             wrap=tk.WORD,
@@ -292,12 +226,10 @@ class TutorInteligenteGUI:
         )
         resumen_area.pack(fill=tk.BOTH, expand=True)
         
-        # Llenar el resumen
-        for i, msg in enumerate(self.mensajes[1:], 1):  # Saltamos el mensaje del sistema
+        for i, msg in enumerate(self.mensajes[1:], 1):
             rol = msg["role"].upper()
             contenido = msg["content"]
             
-            # Truncar contenido si es muy largo
             if len(contenido) > 150:
                 contenido = contenido[:150] + "..."
             
@@ -306,7 +238,6 @@ class TutorInteligenteGUI:
         
         resumen_area.config(state=tk.DISABLED)
         
-        # Botón cerrar
         ttk.Button(
             frame,
             text="Cerrar",
@@ -324,9 +255,6 @@ class TutorInteligenteGUI:
             self.status_var.set("Chat limpiado")
 
 
-# ------------------------------------------------------------
-# PUNTO DE ENTRADA
-# ------------------------------------------------------------
 
 if __name__ == "__main__":
     root = tk.Tk()

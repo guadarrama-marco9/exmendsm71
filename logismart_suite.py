@@ -9,13 +9,20 @@ import sys
 import threading
 import time
 import unittest
+import unicodedata
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from email.message import EmailMessage
 from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
 
-# Bibliotecas externas
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 try:
     import pymongo
     from pymongo import MongoClient
@@ -40,7 +47,6 @@ except ImportError:
     PYDANTIC_AVAILABLE = False
     print("ADVERTENCIA: pydantic no instalado. La validación JSON será básica.")
 
-# Tkinter para GUI
 try:
     import tkinter as tk
     from tkinter import ttk, scrolledtext, messagebox, filedialog
@@ -50,16 +56,10 @@ except ImportError:
     TKINTER_AVAILABLE = False
     print("ADVERTENCIA: tkinter no disponible. La GUI no se podrá ejecutar.")
 
-# Configuración de logging
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 log = logging.getLogger("logismart")
 
-
-# =============================================================================
-# SECCIÓN 1: MONGODB MANAGER
-# =============================================================================
 class MongoDBManager:
-    """Gestiona la conexión y operaciones con MongoDB. Patrón Singleton."""
     
     _instance = None
     _lock = threading.Lock()
@@ -219,12 +219,7 @@ class MongoDBManager:
             self.client.close()
             log.info("Conexión con MongoDB cerrada")
 
-
-# =============================================================================
-# SECCIÓN 2: MOTOR DE REGLAS LÓGICAS
-# =============================================================================
 class MotorReglas:
-    """Motor de reglas lógicas proposicionales para LogiSmart."""
     
     def __init__(self):
         self.historial_evaluaciones = []
@@ -344,10 +339,6 @@ class MotorReglas:
         print("Observaciones: sin P (autorización previa) tanto A como E son siempre F;")
         print("si Q es V, A es siempre F (el exceso de peso bloquea el acceso estándar).\n")
 
-
-# =============================================================================
-# SECCIÓN 3: CLASIFICADOR HÍBRIDO (REGLAS + LLM)
-# =============================================================================
 class Prioridad(Enum):
     BAJA = "baja"
     MEDIA = "media"
@@ -364,7 +355,6 @@ class Prioridad(Enum):
 
 
 class ClasificadorHibrido:
-    """Clasificador híbrido que combina reglas y LLM."""
     
     CATEGORIAS: Dict[str, List[str]] = {
         "materiales_peligrosos": ["peligroso", "derrame", "fuga", "quimico", "inflamable", "toxico", "corrosivo"],
@@ -627,9 +617,6 @@ IMPORTANTE: Devuelve SOLO el JSON, sin texto adicional.
         return salida
 
 
-# =============================================================================
-# SECCIÓN 4: ASISTENTE EXPLICATIVO (RAG)
-# =============================================================================
 class AsistenteExplicativo:
     """Asistente explicativo que usa RAG (Retrieval-Augmented Generation)."""
     
@@ -646,10 +633,18 @@ Sé conciso y claro.
     def __init__(self, mongodb_manager: MongoDBManager):
         self.mongodb = mongodb_manager
         self.historial_consultas = []
+
+    @staticmethod
+    def _normalizar_texto(texto: str) -> str:
+        texto = unicodedata.normalize("NFKD", texto)
+        texto = texto.encode("ascii", "ignore").decode("ascii").casefold()
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", texto).split())
     
     def _extraer_entidades(self, pregunta: str) -> Dict[str, Optional[str]]:
         placa = None
         camion_id = None
+        empresa = None
+        marca = None
         
         m_placa = re.search(r"\b[A-Z0-9]{2,3}-\d{2,3}-[A-Z0-9]{1,2}\b", pregunta.upper())
         if m_placa:
@@ -658,8 +653,85 @@ Sé conciso y claro.
         m_camion = re.search(r"\bCAM-\d+\b", pregunta.upper())
         if m_camion:
             camion_id = m_camion.group(0)
-        
-        return {"placa": placa, "camion_id": camion_id}
+
+        pregunta_normalizada = self._normalizar_texto(pregunta)
+        m_empresa = re.search(r"\bempresa\s+(.+)$", pregunta, flags=re.IGNORECASE)
+        if m_empresa:
+            empresa = m_empresa.group(1).strip(" \t\r\n?!,;")
+
+        es_consulta_vehiculos = bool(re.search(
+            r"\b(camiones?|carros?|vehiculos?)\b", pregunta_normalizada))
+        if es_consulta_vehiculos and not empresa:
+            m_marca = re.search(
+                r"\b(?:camiones?|carros?|vehiculos?)\s+"
+                r"(?:(?:de|la|marca)\s+)*([a-z0-9][a-z0-9 ]*?)\s*$",
+                pregunta_normalizada)
+            if m_marca:
+                posible_marca = m_marca.group(1).strip()
+                if posible_marca not in {"tengo", "hay", "registrados", "registradas"}:
+                    marca = posible_marca
+
+        return {
+            "placa": placa,
+            "camion_id": camion_id,
+            "empresa": empresa,
+            "marca": marca,
+            "consulta_vehiculos": "si" if es_consulta_vehiculos else None,
+        }
+
+    def _responder_consulta_vehiculos(
+        self, pregunta: str, entidades: Dict[str, Optional[str]]
+    ) -> str:
+        camiones = self.mongodb.buscar("camiones")
+        empresa = entidades["empresa"]
+        marca = entidades["marca"]
+
+        if empresa:
+            empresa_normalizada = self._normalizar_texto(empresa)
+            camiones = [
+                camion for camion in camiones
+                if empresa_normalizada in self._normalizar_texto(
+                    str(camion.get("empresa", "")))
+            ]
+            descripcion = f"de la empresa {empresa.rstrip('. ')}"
+        elif marca:
+            marca_normalizada = self._normalizar_texto(marca)
+            camiones = [
+                camion for camion in camiones
+                if marca_normalizada in self._normalizar_texto(
+                    f"{camion.get('marca', '')} {camion.get('modelo', '')}")
+            ]
+            descripcion = f"de la marca {marca.title()}"
+        else:
+            descripcion = "registrados"
+
+        if not camiones:
+            detalle = (
+                f" {descripcion}" if empresa or marca else ""
+            )
+            return f"No hay camiones{detalle} en los registros."
+
+        sustantivo = "camión" if len(camiones) == 1 else "camiones"
+        pregunta_normalizada = self._normalizar_texto(pregunta)
+        es_conteo = bool(re.search(
+            r"\b(cuantos?|cuantas?|cantidad|total)\b", pregunta_normalizada))
+        if es_conteo:
+            return f"Tienes {len(camiones)} {sustantivo} {descripcion}."
+
+        listado = []
+        for camion in camiones:
+            datos = [
+                camion.get("placa", "sin placa"),
+                camion.get("camion_id", "sin ID"),
+            ]
+            if camion.get("marca"):
+                datos.append(str(camion["marca"]))
+            listado.append(" - ".join(datos))
+        return (
+            f"Encontré {len(camiones)} {sustantivo} {descripcion}: "
+            + "; ".join(listado)
+            + "."
+        )
     
     def _recuperar_contexto(self, entidades: Dict[str, Optional[str]]) -> str:
         contexto = []
@@ -692,10 +764,13 @@ Sé conciso y claro.
         return "\n\n".join(contexto) if contexto else "No se encontró información en los registros."
     
     def explicar(self, pregunta: str) -> str:
+        entidades = self._extraer_entidades(pregunta)
+        if entidades["consulta_vehiculos"]:
+            return self._responder_consulta_vehiculos(pregunta, entidades)
+
         if not OLLAMA_AVAILABLE:
             return "Lo siento, Ollama no está disponible. No puedo generar explicaciones."
-        
-        entidades = self._extraer_entidades(pregunta)
+
         contexto = self._recuperar_contexto(entidades)
         
         try:
@@ -726,9 +801,6 @@ Sé conciso y claro.
             return f"Error al generar explicación: {e}"
 
 
-# =============================================================================
-# SECCIÓN 5: GESTOR DE RIESGOS ÉTICOS
-# =============================================================================
 class NivelRiesgo(Enum):
     BAJO = "bajo"
     MEDIO = "medio"
@@ -766,9 +838,7 @@ class RiesgoEtico:
     
     @property
     def puntaje_residual(self) -> int:
-        """Calcula el puntaje residual después de la mitigación."""
         if self.mitigacion:
-            # Asumimos que la mitigación reduce la probabilidad en 1 nivel (mínimo 1)
             probabilidad_residual = max(1, self.probabilidad - 1)
             return probabilidad_residual * self.impacto
         return self.puntaje
@@ -780,14 +850,12 @@ class RiesgoEtico:
 
 @dataclass
 class ModuloIA:
-    """Módulo del sistema que se evalúa."""
     nombre: str
     descripcion: str = ""
     riesgos: List[RiesgoEtico] = field(default_factory=list)
 
 
 class GestorRiesgos:
-    """Gestor de matriz de riesgos éticos."""
     
     CATEGORIAS_VALIDAS = {"sesgo", "privacidad", "transparencia", "seguridad", "responsabilidad", "otro"}
     
@@ -885,12 +953,7 @@ class GestorRiesgos:
         with open(ruta, "w", encoding="utf-8") as f:
             f.write(self.reporte_texto())
 
-
-# =============================================================================
-# SECCIÓN 6: GUI COMPLETA CON 7 MÓDULOS
-# =============================================================================
 class LogiSmartGUI:
-    """Interfaz gráfica completa con 7 módulos."""
     
     def __init__(self, root):
         if not TKINTER_AVAILABLE:
@@ -899,37 +962,28 @@ class LogiSmartGUI:
         self.root = root
         self.root.title("LogiSmart - Sistema de Control Inteligente")
         self.root.geometry("1200x800")
-        
-        # Inicializar componentes
         self.mongodb = MongoDBManager()
         self.motor_reglas = MotorReglas()
         self.clasificador = ClasificadorHibrido(usar_llm=True)
         self.asistente = AsistenteExplicativo(self.mongodb)
         self.gestor_riesgos = GestorRiesgos("LogiSmart GUI")
-        
-        # Configurar estilos
         self.configurar_estilos()
-        
-        # Crear interfaz
         self.crear_interfaz()
-        
-        # Cargar datos de ejemplo
         self.cargar_datos_ejemplo()
+        self.actualizar_lista_camiones()
     
     def configurar_estilos(self):
         self.style = ttk.Style()
         self.style.theme_use('clam')
         
-        # Colores modernos con sombras
-        bg_color = '#ecf0f1'
-        header_bg = '#3498db'
+        bg_color = '#f5f6fa'
+        header_bg = '#2c3e50'
         header_fg = '#ffffff'
-        accent_color = '#2980b9'
+        accent_color = '#3498db'
         text_color = '#2c3e50'
         success_color = '#27ae60'
         warning_color = '#f39c12'
         danger_color = '#e74c3c'
-        shadow_color = '#bdc3c7'
         
         self.root.configure(bg=bg_color)
         
@@ -937,7 +991,7 @@ class LogiSmartGUI:
         self.style.configure('TLabel', background=bg_color, font=('Segoe UI', 10), foreground=text_color)
         self.style.configure('TButton', font=('Segoe UI', 10, 'bold'), background=accent_color, foreground='white', 
                             relief='raised', borderwidth=2)
-        self.style.map('TButton', background=[('active', '#1f6391'), ('pressed', '#1a5276')])
+        self.style.map('TButton', background=[('active', '#2980b9'), ('pressed', '#1a5276')])
         self.style.configure('Header.TLabel', font=('Segoe UI', 14, 'bold'), background=header_bg, foreground=header_fg, 
                             relief='raised', borderwidth=3)
         self.style.configure('Info.TLabel', font=('Segoe UI', 9), background=bg_color, foreground='#7f8c8d')
@@ -946,9 +1000,8 @@ class LogiSmartGUI:
         self.style.configure('TLabelframe', background=bg_color, foreground=text_color, relief='raised', borderwidth=2)
         self.style.configure('TLabelframe.Label', background=bg_color, foreground=text_color, font=('Segoe UI', 10, 'bold'))
         self.style.configure('TNotebook', background=bg_color, relief='raised', borderwidth=2)
-        self.style.configure('TNotebook.Tab', background='#bdc3c7', foreground=text_color, padding=[12, 8], relief='raised')
-        self.style.map('TNotebook.Tab', background=[('selected', header_bg)], foreground=[('selected', 'white')])
-        
+        self.style.configure('TNotebook.Tab', background='#dcdde1', foreground=text_color, padding=[12, 8], relief='raised')
+        self.style.map('TNotebook.Tab', background=[('selected', accent_color)], foreground=[('selected', 'white')])
         self.style.configure('TScrolledtext', background='white', relief='raised', borderwidth=2)
     
     def crear_interfaz(self):
@@ -960,6 +1013,7 @@ class LogiSmartGUI:
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         self.crear_panel_control()
+        self.crear_modulo_camiones()
         self.crear_modulo_acceso()
         self.crear_modulo_incidentes()
         self.crear_modulo_asistente()
@@ -970,44 +1024,40 @@ class LogiSmartGUI:
     def crear_panel_control(self):
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="Panel de Control")
-        
-        header = tk.Frame(frame, bg='#3498db', height=80)
+        header = tk.Frame(frame, bg='#2c3e50', height=80)
         header.pack(fill=tk.X, padx=10, pady=10)
         header.pack_propagate(False)
-        
-        tk.Label(header, text="PANEL DE CONTROL", bg='#3498db', fg='white',
+        tk.Label(header, text="PANEL DE CONTROL", bg='#2c3e50', fg='white',
                 font=('Segoe UI', 18, 'bold')).pack(pady=(15, 5))
-        tk.Label(header, text="Sistema de Control Inteligente LogiSmart", bg='#3498db', fg='#ecf0f1',
+        tk.Label(header, text="Sistema de Control Inteligente LogiSmart", bg='#2c3e50', fg='#ecf0f1',
                 font=('Segoe UI', 10)).pack(pady=(0, 15))
-        
         info_frame = ttk.LabelFrame(frame, text="Estado del Sistema", padding=15)
         info_frame.pack(fill=tk.X, padx=15, pady=10)
         
         mongo_status = "Conectado" if self.mongodb.esta_conectado() else "Modo Simulación"
         ollama_status = "Disponible" if OLLAMA_AVAILABLE else "No disponible"
-        
-        status_container = tk.Frame(info_frame, bg='#ecf0f1')
+        status_container = tk.Frame(info_frame, bg="#f5f6fa")
         status_container.pack(fill=tk.X, pady=5)
         
-        tk.Label(status_container, text="MongoDB:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky=tk.W, padx=10, pady=5)
-        tk.Label(status_container, text=mongo_status, bg='#ecf0f1', font=('Segoe UI', 10)).grid(row=0, column=1, sticky=tk.W, padx=10, pady=5)
+        tk.Label(status_container, text="MongoDB:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold'), fg='#2c3e50').grid(row=0, column=0, sticky=tk.W, padx=10, pady=5)
+        tk.Label(status_container, text=mongo_status, bg='#f5f6fa', font=('Segoe UI', 10), fg='#2c3e50').grid(row=0, column=1, sticky=tk.W, padx=10, pady=5)
         
-        tk.Label(status_container, text="Ollama:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=1, column=0, sticky=tk.W, padx=10, pady=5)
-        tk.Label(status_container, text=ollama_status, bg='#ecf0f1', font=('Segoe UI', 10)).grid(row=1, column=1, sticky=tk.W, padx=10, pady=5)
+        tk.Label(status_container, text="Ollama:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold'), fg='#2c3e50').grid(row=1, column=0, sticky=tk.W, padx=10, pady=5)
+        tk.Label(status_container, text=ollama_status, bg='#f5f6fa',  font=('Segoe UI', 10), fg='#2c3e50').grid(row=1, column=1, sticky=tk.W, padx=10, pady=5)
         
-        tk.Label(status_container, text="Modelo:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=2, column=0, sticky=tk.W, padx=10, pady=5)
-        tk.Label(status_container, text="llama3.2", bg='#ecf0f1', font=('Segoe UI', 10)).grid(row=2, column=1, sticky=tk.W, padx=10, pady=5)
+        tk.Label(status_container, text="Modelo:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold'), fg='#2c3e50').grid(row=2, column=0, sticky=tk.W, padx=10, pady=5)
+        tk.Label(status_container, text="llama3.2", bg="#f5f6fa", font=('Segoe UI', 10), fg='#2c3e50').grid(row=2, column=1, sticky=tk.W, padx=10, pady=5)
         
         stats_frame = ttk.LabelFrame(frame, text="Estadísticas en Tiempo Real", padding=15)
         stats_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        stats_container = tk.Frame(stats_frame, bg='#ecf0f1')
+        stats_container = tk.Frame(stats_frame, bg='#f5f6fa')
         stats_container.pack(fill=tk.X, pady=5)
         
         self.stats_labels = {}
         stats_info = [
-            ("camiones", "Camiones", "#3498db"),
-            ("accesos", "Accesos", "#27ae60"),
+            ("camiones", "Camiones", "#27ae60"),
+            ("accesos", "Accesos", "#8e44ad"),
             ("incidentes", "Incidentes", "#e74c3c"),
             ("riesgos", "Riesgos", "#f39c12")
         ]
@@ -1023,24 +1073,102 @@ class LogiSmartGUI:
         stats_container.columnconfigure(0, weight=1)
         stats_container.columnconfigure(1, weight=1)
         
-        btn_frame = tk.Frame(stats_frame, bg='#ecf0f1')
+        btn_frame = tk.Frame(stats_frame, bg='#f5f6fa')
         btn_frame.pack(fill=tk.X, pady=15)
         
         ttk.Button(btn_frame, text="Actualizar Estadísticas", command=self.actualizar_estadisticas).pack(pady=5)
         
         self.actualizar_estadisticas()
+
+    def crear_modulo_camiones(self):
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text="Camiones")
+
+        header = tk.Frame(frame, bg='#27ae60', height=70)
+        header.pack(fill=tk.X, padx=10, pady=10)
+        header.pack_propagate(False)
+
+        tk.Label(header, text="REGISTRO DE CAMIONES", bg='#27ae60', fg='white',
+                font=('Segoe UI', 16, 'bold')).pack(pady=(15, 5))
+        tk.Label(header, text="Registra y consulta los vehículos autorizados",
+                bg='#27ae60', fg='#ecf0f1', font=('Segoe UI', 10)).pack(pady=(0, 15))
+
+        form_frame = ttk.LabelFrame(frame, text="Datos del Camión", padding=15)
+        form_frame.pack(fill=tk.X, padx=15, pady=8)
+
+        fields = (
+            ("Placa:", "placa"),
+            ("ID del camión:", "camion_id"),
+            ("Empresa transportista:", "empresa"),
+            ("Marca (p. ej., Mazda):", "marca"),
+        )
+        self.camion_entries = {}
+        for row, (label, key) in enumerate(fields):
+            tk.Label(form_frame, text=label, bg='#f5f6fa',
+                    font=('Segoe UI', 10, 'bold')).grid(
+                        row=row, column=0, sticky=tk.W, padx=8, pady=5)
+            entry = ttk.Entry(form_frame, width=42, font=('Segoe UI', 10))
+            entry.grid(row=row, column=1, sticky=tk.W, padx=8, pady=5)
+            self.camion_entries[key] = entry
+
+        self.camion_autorizacion = tk.BooleanVar(value=True)
+        self.camion_certificado = tk.BooleanVar(value=True)
+        self.camion_certificacion_vigente = tk.BooleanVar(value=True)
+        checks = (
+            ("Autorización previa", self.camion_autorizacion),
+            ("Conductor certificado", self.camion_certificado),
+            ("Certificación vigente", self.camion_certificacion_vigente),
+        )
+        for column, (label, variable) in enumerate(checks):
+            tk.Checkbutton(form_frame, text=label, variable=variable, bg='#f5f6fa',
+                           font=('Segoe UI', 9), activebackground='#f5f6fa',
+                           selectcolor='#3498db').grid(
+                               row=4, column=column, sticky=tk.W, padx=6, pady=5)
+
+        buttons = ttk.Frame(form_frame)
+        buttons.grid(row=5, column=0, columnspan=5, sticky=tk.W, padx=8, pady=(10, 0))
+        ttk.Button(buttons, text="Registrar camión",
+                   command=self.registrar_camion).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(buttons, text="Actualizar lista",
+                   command=self.actualizar_lista_camiones).pack(side=tk.LEFT)
+
+        list_frame = ttk.LabelFrame(frame, text="Camiones registrados", padding=10)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=8)
+
+        columns = ("placa", "camion_id", "empresa", "marca", "autorizacion",
+                   "certificado", "vigente")
+        self.camiones_tree = ttk.Treeview(
+            list_frame, columns=columns, show="headings", height=12)
+        headings = {
+            "placa": ("Placa", 120),
+            "camion_id": ("ID", 120),
+            "empresa": ("Empresa", 260),
+            "marca": ("Marca", 120),
+            "autorizacion": ("Autorizado", 110),
+            "certificado": ("Conductor certificado", 160),
+            "vigente": ("Certificación vigente", 160),
+        }
+        for column, (heading, width) in headings.items():
+            self.camiones_tree.heading(column, text=heading)
+            self.camiones_tree.column(column, width=width, anchor=tk.W)
+
+        scrollbar = ttk.Scrollbar(
+            list_frame, orient=tk.VERTICAL, command=self.camiones_tree.yview)
+        self.camiones_tree.configure(yscrollcommand=scrollbar.set)
+        self.camiones_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     
     def crear_modulo_acceso(self):
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="Acceso")
         
-        header = tk.Frame(frame, bg='#2980b9', height=70)
+        header = tk.Frame(frame, bg='#3498db', height=70)
         header.pack(fill=tk.X, padx=10, pady=10)
         header.pack_propagate(False)
         
-        tk.Label(header, text="MÓDULO DE ACCESO", bg='#2980b9', fg='white',
+        tk.Label(header, text="MÓDULO DE ACCESO", bg='#3498db', fg='white',
                 font=('Segoe UI', 16, 'bold')).pack(pady=(15, 5))
-        tk.Label(header, text="Evaluación de Camiones con Motor de Reglas", bg='#2980b9', fg='#ecf0f1',
+        tk.Label(header, text="Evaluación de Camiones con Motor de Reglas", bg='#3498db', fg='#ecf0f1',
                 font=('Segoe UI', 10)).pack(pady=(0, 15))
         
         form_frame = ttk.LabelFrame(frame, text="Evaluar Camión", padding=20)
@@ -1058,18 +1186,18 @@ class LogiSmartGUI:
         labels = [("P", "Autorización previa"), ("Q", "Exceso de peso"), ("R", "Materiales peligrosos"),
                   ("S", "Conductor certificado"), ("V", "Certificación vigente"), ("H", "Horario restringido")]
         
-        checkbox_container = tk.Frame(form_frame, bg='#ecf0f1')
+        checkbox_container = tk.Frame(form_frame, bg='#f5f6fa')
         checkbox_container.pack(fill=tk.X, pady=10)
         
         for i, (key, label) in enumerate(labels):
-            chk_frame = tk.Frame(checkbox_container, bg='#ecf0f1')
+            chk_frame = tk.Frame(checkbox_container, bg='#f5f6fa')
             chk_frame.grid(row=i//2, column=i%2, sticky=tk.W, padx=15, pady=8)
             
             tk.Checkbutton(chk_frame, text=label, variable=self.acceso_vars[key],
-                         bg='#ecf0f1', font=('Segoe UI', 10), activebackground='#ecf0f1',
+                         bg='#f5f6fa', font=('Segoe UI', 10), activebackground='#f5f6fa',
                          selectcolor='#3498db').pack(anchor=tk.W)
         
-        btn_frame = tk.Frame(form_frame, bg='#ecf0f1')
+        btn_frame = tk.Frame(form_frame, bg='#f5f6fa')
         btn_frame.pack(fill=tk.X, pady=15)
         
         ttk.Button(btn_frame, text="Evaluar Camión", command=self.evaluar_acceso).pack(pady=5)
@@ -1085,35 +1213,35 @@ class LogiSmartGUI:
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="Incidentes")
         
-        header = tk.Frame(frame, bg='#e74c3c', height=70)
+        header = tk.Frame(frame, bg='#c0392b', height=70)
         header.pack(fill=tk.X, padx=10, pady=10)
         header.pack_propagate(False)
         
-        tk.Label(header, text="MÓDULO DE INCIDENTES", bg='#e74c3c', fg='white',
+        tk.Label(header, text="MÓDULO DE INCIDENTES", bg='#c0392b', fg='white',
                 font=('Segoe UI', 16, 'bold')).pack(pady=(15, 5))
-        tk.Label(header, text="Clasificación Híbrida (Reglas + LLM)", bg='#e74c3c', fg='#ecf0f1',
+        tk.Label(header, text="Clasificación Híbrida (Reglas + LLM)", bg='#c0392b', fg='#ecf0f1',
                 font=('Segoe UI', 10)).pack(pady=(0, 15))
         
         form_frame = ttk.LabelFrame(frame, text="Reportar Incidente", padding=20)
         form_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        input_container = tk.Frame(form_frame, bg='#ecf0f1')
+        input_container = tk.Frame(form_frame, bg='#f5f6fa')
         input_container.pack(fill=tk.X, pady=10)
         
-        tk.Label(input_container, text="Remitente:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(input_container, text="Remitente:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky=tk.W, padx=10, pady=8)
         self.incidente_remitente = ttk.Entry(input_container, width=50, font=('Segoe UI', 10))
         self.incidente_remitente.grid(row=0, column=1, sticky=tk.W, padx=10, pady=8)
         
-        tk.Label(input_container, text="Asunto:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=1, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(input_container, text="Asunto:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=1, column=0, sticky=tk.W, padx=10, pady=8)
         self.incidente_asunto = ttk.Entry(input_container, width=50, font=('Segoe UI', 10))
         self.incidente_asunto.grid(row=1, column=1, sticky=tk.W, padx=10, pady=8)
         
-        tk.Label(input_container, text="Cuerpo:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=2, column=0, sticky=tk.NW, padx=10, pady=8)
+        tk.Label(input_container, text="Cuerpo:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=2, column=0, sticky=tk.NW, padx=10, pady=8)
         self.incidente_cuerpo = scrolledtext.ScrolledText(input_container, height=6, width=50, font=('Segoe UI', 10),
                                                          bg='white', relief='raised', borderwidth=2)
         self.incidente_cuerpo.grid(row=2, column=1, sticky=tk.W, padx=10, pady=8)
         
-        btn_frame = tk.Frame(form_frame, bg='#ecf0f1')
+        btn_frame = tk.Frame(form_frame, bg='#f5f6fa')
         btn_frame.pack(fill=tk.X, pady=15)
         
         ttk.Button(btn_frame, text="Clasificar Incidente", command=self.clasificar_incidente).pack(pady=5)
@@ -1129,13 +1257,13 @@ class LogiSmartGUI:
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="Asistente")
         
-        header = tk.Frame(frame, bg='#9b59b6', height=70)
+        header = tk.Frame(frame, bg='#8e44ad', height=70)
         header.pack(fill=tk.X, padx=10, pady=10)
         header.pack_propagate(False)
         
-        tk.Label(header, text="ASISTENTE EXPLICATIVO", bg='#9b59b6', fg='white',
+        tk.Label(header, text="ASISTENTE EXPLICATIVO", bg='#8e44ad', fg='white',
                 font=('Segoe UI', 16, 'bold')).pack(pady=(15, 5))
-        tk.Label(header, text="Retrieval-Augmented Generation (RAG)", bg='#9b59b6', fg='#ecf0f1',
+        tk.Label(header, text="Retrieval-Augmented Generation (RAG)", bg='#8e44ad', fg='#ecf0f1',
                 font=('Segoe UI', 10)).pack(pady=(0, 15))
         
         chat_frame = ttk.LabelFrame(frame, text="Conversación", padding=20)
@@ -1151,10 +1279,10 @@ class LogiSmartGUI:
         input_frame = ttk.LabelFrame(frame, text="Pregunta", padding=15)
         input_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        input_container = tk.Frame(input_frame, bg='#ecf0f1')
+        input_container = tk.Frame(input_frame, bg='#f5f6fa')
         input_container.pack(fill=tk.X, pady=5)
         
-        tk.Label(input_container, text="Escribe tu pregunta:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).pack(side=tk.LEFT, padx=10)
+        tk.Label(input_container, text="Escribe tu pregunta:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).pack(side=tk.LEFT, padx=10)
         self.asistente_pregunta = ttk.Entry(input_container, width=60, font=('Segoe UI', 10))
         self.asistente_pregunta.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
         self.asistente_pregunta.bind('<Return>', lambda e: self.enviar_pregunta_asistente())
@@ -1167,46 +1295,46 @@ class LogiSmartGUI:
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="Riesgos")
         
-        header = tk.Frame(frame, bg='#f39c12', height=70)
+        header = tk.Frame(frame, bg='#d35400', height=70)
         header.pack(fill=tk.X, padx=10, pady=10)
         header.pack_propagate(False)
         
-        tk.Label(header, text="MATRIZ DE RIESGOS ÉTICOS", bg='#f39c12', fg='white',
+        tk.Label(header, text="MATRIZ DE RIESGOS ÉTICOS", bg='#d35400', fg='white',
                 font=('Segoe UI', 16, 'bold')).pack(pady=(15, 5))
-        tk.Label(header, text="Gestión y Análisis de Riesgos de IA", bg='#f39c12', fg='#ecf0f1',
+        tk.Label(header, text="Gestión y Análisis de Riesgos de IA", bg='#d35400', fg='#ecf0f1',
                 font=('Segoe UI', 10)).pack(pady=(0, 15))
         
         form_frame = ttk.LabelFrame(frame, text="Registrar Riesgo", padding=20)
         form_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        input_container = tk.Frame(form_frame, bg='#ecf0f1')
+        input_container = tk.Frame(form_frame, bg='#f5f6fa')
         input_container.pack(fill=tk.X, pady=10)
         
-        tk.Label(input_container, text="Módulo:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(input_container, text="Módulo:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky=tk.W, padx=10, pady=8)
         self.riesgo_modulo = ttk.Entry(input_container, width=30, font=('Segoe UI', 10))
         self.riesgo_modulo.grid(row=0, column=1, sticky=tk.W, padx=10, pady=8)
         
-        tk.Label(input_container, text="Descripción:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=1, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(input_container, text="Descripción:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=1, column=0, sticky=tk.W, padx=10, pady=8)
         self.riesgo_descripcion = ttk.Entry(input_container, width=30, font=('Segoe UI', 10))
         self.riesgo_descripcion.grid(row=1, column=1, sticky=tk.W, padx=10, pady=8)
         
-        tk.Label(input_container, text="Categoría:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=2, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(input_container, text="Categoría:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=2, column=0, sticky=tk.W, padx=10, pady=8)
         self.riesgo_categoria = ttk.Combobox(input_container, values=list(GestorRiesgos.CATEGORIAS_VALIDAS), width=27, font=('Segoe UI', 10))
         self.riesgo_categoria.grid(row=2, column=1, sticky=tk.W, padx=10, pady=8)
         
-        tk.Label(input_container, text="Probabilidad (1-5):", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=3, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(input_container, text="Probabilidad (1-5):", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=3, column=0, sticky=tk.W, padx=10, pady=8)
         self.riesgo_probabilidad = ttk.Spinbox(input_container, from_=1, to=5, width=10, font=('Segoe UI', 10))
         self.riesgo_probabilidad.grid(row=3, column=1, sticky=tk.W, padx=10, pady=8)
         
-        tk.Label(input_container, text="Impacto (1-5):", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=4, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(input_container, text="Impacto (1-5):", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=4, column=0, sticky=tk.W, padx=10, pady=8)
         self.riesgo_impacto = ttk.Spinbox(input_container, from_=1, to=5, width=10, font=('Segoe UI', 10))
         self.riesgo_impacto.grid(row=4, column=1, sticky=tk.W, padx=10, pady=8)
         
-        tk.Label(input_container, text="Mitigación:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=5, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(input_container, text="Mitigación:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=5, column=0, sticky=tk.W, padx=10, pady=8)
         self.riesgo_mitigacion = ttk.Entry(input_container, width=30, font=('Segoe UI', 10))
         self.riesgo_mitigacion.grid(row=5, column=1, sticky=tk.W, padx=10, pady=8)
         
-        btn_frame = tk.Frame(form_frame, bg='#ecf0f1')
+        btn_frame = tk.Frame(form_frame, bg='#f5f6fa')
         btn_frame.pack(fill=tk.X, pady=15)
         
         ttk.Button(btn_frame, text="Registrar Riesgo", command=self.registrar_riesgo).pack(pady=5)
@@ -1227,19 +1355,19 @@ class LogiSmartGUI:
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="Reportes")
         
-        header = tk.Frame(frame, bg='#1abc9c', height=70)
+        header = tk.Frame(frame, bg='#16a085', height=70)
         header.pack(fill=tk.X, padx=10, pady=10)
         header.pack_propagate(False)
         
-        tk.Label(header, text="REPORTES Y EXPORTACIÓN", bg='#1abc9c', fg='white',
+        tk.Label(header, text="REPORTES Y EXPORTACIÓN", bg='#16a085', fg='white',
                 font=('Segoe UI', 16, 'bold')).pack(pady=(15, 5))
-        tk.Label(header, text="Generación y Exportación de Datos", bg='#1abc9c', fg='#ecf0f1',
+        tk.Label(header, text="Generación y Exportación de Datos", bg='#16a085', fg='#ecf0f1',
                 font=('Segoe UI', 10)).pack(pady=(0, 15))
         
         export_frame = ttk.LabelFrame(frame, text="Exportar Datos", padding=20)
         export_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        btn_container = tk.Frame(export_frame, bg='#ecf0f1')
+        btn_container = tk.Frame(export_frame, bg='#f5f6fa')
         btn_container.pack(fill=tk.X, pady=10)
         
         ttk.Button(btn_container, text="Exportar Tablas de Verdad", command=self.exportar_tablas_verdad).pack(fill=tk.X, pady=8, padx=10)
@@ -1255,76 +1383,71 @@ class LogiSmartGUI:
     
     def crear_modulo_config(self):
         frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="⚙️ Config")
+        self.notebook.add(frame, text="Config")
         
-        header = tk.Frame(frame, bg='#34495e', height=70)
+        header = tk.Frame(frame, bg='#7f8c8d', height=70)
         header.pack(fill=tk.X, padx=10, pady=10)
         header.pack_propagate(False)
         
-        tk.Label(header, text="CONFIGURACIÓN DEL SISTEMA", bg='#34495e', fg='white',
+        tk.Label(header, text="CONFIGURACIÓN DEL SISTEMA", bg='#7f8c8d', fg='white',
                 font=('Segoe UI', 16, 'bold')).pack(pady=(15, 5))
-        tk.Label(header, text="Ajustes de MongoDB y LLM", bg='#34495e', fg='#ecf0f1',
+        tk.Label(header, text="Ajustes de MongoDB y LLM", bg='#7f8c8d', fg='#ecf0f1',
                 font=('Segoe UI', 10)).pack(pady=(0, 15))
         
-        # Configuración MongoDB con mejor diseño
         mongo_frame = ttk.LabelFrame(frame, text="MongoDB", padding=20)
         mongo_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        mongo_container = tk.Frame(mongo_frame, bg='#ecf0f1')
+        mongo_container = tk.Frame(mongo_frame, bg='#f5f6fa')
         mongo_container.pack(fill=tk.X, pady=10)
         
-        tk.Label(mongo_container, text="🔗 URI:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(mongo_container, text="URI:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky=tk.W, padx=10, pady=8)
         self.mongo_uri = ttk.Entry(mongo_container, width=50, font=('Segoe UI', 10))
         self.mongo_uri.insert(0, "mongodb://localhost:27017/")
         self.mongo_uri.grid(row=0, column=1, sticky=tk.W, padx=10, pady=8)
         
-        tk.Label(mongo_container, text="🗄️ Base de datos:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=1, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(mongo_container, text="Base de datos:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=1, column=0, sticky=tk.W, padx=10, pady=8)
         self.mongo_db = ttk.Entry(mongo_container, width=50, font=('Segoe UI', 10))
         self.mongo_db.insert(0, "logismart")
         self.mongo_db.grid(row=1, column=1, sticky=tk.W, padx=10, pady=8)
         
-        # Botón reconectar con mejor diseño
-        btn_mongo = tk.Frame(mongo_frame, bg='#ecf0f1')
+        btn_mongo = tk.Frame(mongo_frame, bg='#f5f6fa')
         btn_mongo.pack(fill=tk.X, pady=15)
         
-        ttk.Button(btn_mongo, text="🔄 Reconectar MongoDB", command=self.reconectar_mongodb).pack(pady=5)
+        ttk.Button(btn_mongo, text="Reconectar MongoDB", command=self.reconectar_mongodb).pack(pady=5)
         
-        # Configuración LLM con mejor diseño
         llm_frame = ttk.LabelFrame(frame, text="LLM (Ollama)", padding=20)
         llm_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        llm_container = tk.Frame(llm_frame, bg='#ecf0f1')
+        llm_container = tk.Frame(llm_frame, bg='#f5f6fa')
         llm_container.pack(fill=tk.X, pady=10)
         
-        tk.Label(llm_container, text="🧠 Modelo:", bg='#ecf0f1', font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky=tk.W, padx=10, pady=8)
+        tk.Label(llm_container, text="Modelo:", bg='#f5f6fa', font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky=tk.W, padx=10, pady=8)
         self.llm_modelo = ttk.Entry(llm_container, width=50, font=('Segoe UI', 10))
         self.llm_modelo.insert(0, "llama3.2")
         self.llm_modelo.grid(row=0, column=1, sticky=tk.W, padx=10, pady=8)
         
         self.llm_usar = tk.BooleanVar(value=True)
-        tk.Checkbutton(llm_container, text="✅ Usar LLM para clasificación", variable=self.llm_usar,
-                      bg='#ecf0f1', font=('Segoe UI', 10), activebackground='#ecf0f1',
+        tk.Checkbutton(llm_container, text="Usar LLM para clasificación", variable=self.llm_usar,
+                      bg='#f5f6fa', font=('Segoe UI', 10), activebackground='#f5f6fa',
                       selectcolor='#3498db').grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=10, pady=8)
         
-        # Botón aplicar con mejor diseño
-        btn_llm = tk.Frame(llm_frame, bg='#ecf0f1')
+        btn_llm = tk.Frame(llm_frame, bg='#f5f6fa')
         btn_llm.pack(fill=tk.X, pady=15)
         
-        ttk.Button(btn_llm, text="💾 Aplicar Configuración", command=self.aplicar_config_llm).pack(pady=5)
+        ttk.Button(btn_llm, text="Aplicar Configuración", command=self.aplicar_config_llm).pack(pady=5)
     
     def cargar_datos_ejemplo(self):
         """Carga datos de ejemplo en MongoDB (modo simulación)."""
-        # Camión de ejemplo
-        self.mongodb.insertar("camiones", {
-            "placa": "ABC-123-D",
-            "camion_id": "CAM-102",
-            "empresa": "Transportes S.A.",
-            "autorizacion": True,
-            "certificacion_conductor": True,
-            "fecha_registro": datetime.now().isoformat()
-        })
+        if not self.mongodb.buscar("camiones", {"placa": "ABC-123-D"}, limite=1):
+            self.mongodb.insertar("camiones", {
+                "placa": "ABC-123-D",
+                "camion_id": "CAM-102",
+                "empresa": "Transportes S.A.",
+                "autorizacion": True,
+                "certificacion_conductor": True,
+                "fecha_registro": datetime.now().isoformat()
+            })
         
-        # Acceso de ejemplo
         self.mongodb.insertar("accesos", {
             "P": True, "Q": False, "R": False, "S": True,
             "resultado": {
@@ -1337,7 +1460,67 @@ class LogiSmartGUI:
             "timestamp": datetime.now().isoformat(),
             "operador": "juan.perez"
         })
-    
+
+    def registrar_camion(self):
+        placa = self.camion_entries["placa"].get().strip().upper()
+        camion_id = self.camion_entries["camion_id"].get().strip().upper()
+        empresa = self.camion_entries["empresa"].get().strip()
+
+        if not placa or not camion_id or not empresa:
+            messagebox.showwarning(
+                "Datos incompletos",
+                "Completa la placa, el ID del camión y la empresa.")
+            return
+
+        try:
+            if self.mongodb.buscar("camiones", {"placa": placa}, limite=1):
+                messagebox.showwarning(
+                    "Camión duplicado",
+                    f"Ya existe un camión registrado con la placa {placa}.")
+                return
+
+            self.mongodb.insertar("camiones", {
+                "placa": placa,
+                "camion_id": camion_id,
+                "empresa": empresa,
+                "marca": self.camion_entries["marca"].get().strip(),
+                "autorizacion": self.camion_autorizacion.get(),
+                "certificacion_conductor": self.camion_certificado.get(),
+                "certificacion_vigente": self.camion_certificacion_vigente.get(),
+                "fecha_registro": datetime.now().isoformat()
+            })
+        except Exception as e:
+            log.exception("No se pudo registrar el camión")
+            messagebox.showerror("Error al registrar camión", str(e))
+            return
+
+        for entry in self.camion_entries.values():
+            entry.delete(0, tk.END)
+        self.actualizar_lista_camiones()
+        self.status_var.set(f"Camión {placa} registrado")
+        messagebox.showinfo("Registro completado", f"Camión {placa} registrado correctamente.")
+
+    def actualizar_lista_camiones(self):
+        try:
+            camiones = self.mongodb.buscar("camiones")
+            self.camiones_tree.delete(*self.camiones_tree.get_children())
+            for camion in camiones:
+                self.camiones_tree.insert("", tk.END, values=(
+                    camion.get("placa", ""),
+                    camion.get("camion_id", ""),
+                    camion.get("empresa", ""),
+                    camion.get("marca", ""),
+                    "Sí" if camion.get("autorizacion", False) else "No",
+                    "Sí" if camion.get("certificacion_conductor", False) else "No",
+                    "Sí" if camion.get("certificacion_vigente", False) else "No",
+                ))
+        except Exception as e:
+            log.exception("No se pudo actualizar la lista de camiones")
+            messagebox.showerror("Error al cargar camiones", str(e))
+            return
+
+        self.actualizar_estadisticas()
+
     def cargar_riesgos_documento(self):
         """Carga los riesgos del documento INFORME_TECNICO.md."""
         riesgos_documento = [
@@ -1377,7 +1560,6 @@ class LogiSmartGUI:
         self.acceso_resultado.delete(1.0, tk.END)
         self.acceso_resultado.insert(tk.END, json.dumps(resultado, ensure_ascii=False, indent=2))
         
-        # Guardar en MongoDB
         self.mongodb.insertar("accesos", {
             "P": P, "Q": Q, "R": R, "S": S,
             "resultado": resultado,
@@ -1398,7 +1580,6 @@ class LogiSmartGUI:
         self.incidente_resultado.delete(1.0, tk.END)
         self.incidente_resultado.insert(tk.END, resultado)
         
-        # Guardar en MongoDB
         datos = json.loads(resultado)
         self.mongodb.insertar("incidentes", datos)
         
@@ -1489,9 +1670,6 @@ class LogiSmartGUI:
         messagebox.showinfo("Configuración", "Configuración LLM aplicada")
 
 
-# =============================================================================
-# PRUEBAS UNITARIAS
-# =============================================================================
 class TestMotorReglas(unittest.TestCase):
     """Pruebas para el Motor de Reglas."""
     
@@ -1559,6 +1737,63 @@ class TestClasificadorHibrido(unittest.TestCase):
         self.assertIn("datos_extraidos", datos)
 
 
+class TestAsistenteExplicativo(unittest.TestCase):
+    """Pruebas de consultas de vehículos con datos del registro."""
+
+    class MongoDBEnMemoria:
+        def __init__(self):
+            self.camiones = [
+                {
+                    "placa": "ABC-123-D",
+                    "camion_id": "CAM-102",
+                    "empresa": "Transportes S.A.",
+                    "marca": "Mazda",
+                },
+                {
+                    "placa": "XYZ-456-A",
+                    "camion_id": "CAM-205",
+                    "empresa": "Transportes S.A.",
+                    "marca": "Toyota",
+                },
+                {
+                    "placa": "DEF-789-B",
+                    "camion_id": "CAM-309",
+                    "empresa": "Otra Empresa",
+                    "marca": "Mazda",
+                },
+            ]
+
+        def buscar(self, coleccion, filtro=None, limite=None):
+            resultados = list(self.camiones) if coleccion == "camiones" else []
+            if filtro:
+                resultados = [
+                    camion for camion in resultados
+                    if all(camion.get(clave) == valor for clave, valor in filtro.items())
+                ]
+            return resultados[:limite] if limite else resultados
+
+    def setUp(self):
+        self.asistente = AsistenteExplicativo(self.MongoDBEnMemoria())
+
+    def test_contar_camiones_por_empresa_sin_ollama(self):
+        respuesta = self.asistente.explicar(
+            "cuantos camiones tengo de esta empresa Transportes S.A."
+        )
+        self.assertIn("Tienes 2 camiones", respuesta)
+        self.assertIn("Transportes S.A.", respuesta)
+
+    def test_buscar_carros_por_marca_sin_ollama(self):
+        respuesta = self.asistente.explicar("carros mazda")
+        self.assertIn("Encontré 2 camiones", respuesta)
+        self.assertIn("ABC-123-D", respuesta)
+        self.assertIn("DEF-789-B", respuesta)
+
+    def test_consulta_marca_sin_resultados(self):
+        respuesta = self.asistente.explicar("camiones marca Honda")
+        self.assertIn("No hay camiones", respuesta)
+        self.assertIn("Honda", respuesta)
+
+
 class TestGestorRiesgos(unittest.TestCase):
     """Pruebas para el Gestor de Riesgos."""
     
@@ -1594,9 +1829,6 @@ class TestGestorRiesgos(unittest.TestCase):
         self.assertIn("modulos", datos)
 
 
-# =============================================================================
-# DEMOSTRACIÓN COMPLETA
-# =============================================================================
 def demo():
     """Ejecuta una demostración completa de todas las secciones."""
     print("=" * 78)
@@ -1604,20 +1836,17 @@ def demo():
     print("=" * 78)
     print()
     
-    # Inicializar componentes
     mongodb = MongoDBManager()
     motor = MotorReglas()
     clasificador = ClasificadorHibrido(usar_llm=True)
     asistente = AsistenteExplicativo(mongodb)
     gestor = GestorRiesgos("LogiSmart Demo")
     
-    # ---- Sección 1: MongoDB ----
     print("SECCIÓN 1: MONGODB MANAGER")
     print("-" * 78)
     print(f"Estado MongoDB: {'Conectado' if mongodb.esta_conectado() else 'Modo Simulación'}")
     print()
     
-    # Insertar datos de ejemplo
     mongodb.insertar("camiones", {
         "placa": "ABC-123-D",
         "camion_id": "CAM-102",
@@ -1628,7 +1857,6 @@ def demo():
     print("Camión de ejemplo insertado en MongoDB")
     print()
     
-    # ---- Sección 2: Motor de Reglas ----
     print("SECCIÓN 2: MOTOR DE REGLAS")
     print("-" * 78)
     motor.imprimir_tablas_verdad()
@@ -1644,7 +1872,6 @@ def demo():
         print(f"  {desc} => A={res['acceso_estandar']}, E={res['inspeccion_especial']}")
     print()
     
-    # ---- Sección 3: Clasificador Híbrido ----
     print("SECCIÓN 3: CLASIFICADOR HÍBRIDO")
     print("-" * 78)
     salida_json = clasificador.procesar_incidente(
@@ -1656,7 +1883,6 @@ def demo():
     print(salida_json)
     print()
     
-    # ---- Sección 4: Asistente Explicativo ----
     print("SECCIÓN 4: ASISTENTE EXPLICATIVO (RAG)")
     print("-" * 78)
     if OLLAMA_AVAILABLE:
@@ -1668,11 +1894,9 @@ def demo():
         print("Ollama no disponible, asistente no ejecutado.")
     print()
     
-    # ---- Sección 5: Gestor de Riesgos ----
     print("SECCIÓN 5: GESTOR DE RIESGOS ÉTICOS")
     print("-" * 78)
     
-    # Cargar riesgos del documento
     riesgos_documento = [
         ("Clasificador", "Alucinaciones del LLM", "seguridad", 3, 4, "Validación JSON"),
         ("Cámara", "Privacidad conductor", "privacidad", 4, 5, "Procesamiento en borde"),
@@ -1686,7 +1910,6 @@ def demo():
     
     print(gestor.reporte_texto())
     
-    # Exportar
     gestor.exportar_json("reporte_riesgos_demo.json")
     gestor.exportar_texto("reporte_riesgos_demo.txt")
     print("\nArchivos generados: reporte_riesgos_demo.json y reporte_riesgos_demo.txt")
@@ -1697,16 +1920,11 @@ def demo():
     print("=" * 78)
 
 
-# =============================================================================
-# PUNTO DE ENTRADA
-# =============================================================================
 if __name__ == "__main__":
     if "--tests" in sys.argv:
-        # Ejecutar pruebas unitarias
         sys.argv.remove("--tests")
         unittest.main(argv=[sys.argv[0], "-v"])
     elif "--gui" in sys.argv:
-        # Ejecutar GUI
         if TKINTER_AVAILABLE:
             root = tk.Tk()
             app = LogiSmartGUI(root)
@@ -1714,10 +1932,8 @@ if __name__ == "__main__":
         else:
             print("ERROR: Tkinter no está disponible. No se puede ejecutar la GUI.")
     else:
-        # Ejecutar demostración
         demo()
         
-        # Ejecutar pruebas después de la demo
         print("\n" + "=" * 78)
         print("PRUEBAS UNITARIAS")
         print("=" * 78)
